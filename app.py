@@ -27,27 +27,15 @@ st.markdown("""
 # 3. CONEXIÓN A BASE DE DATOS (GOOGLE SHEETS)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- NUEVA LÓGICA DE CARGA DIRECTA ---
 def cargar_datos():
     try:
-        # Extraemos el ID de la planilla de los secrets
-        raw_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        sheet_id = raw_url.split("/d/")[1].split("/")[0]
-        
-        # URL directa para CSV (hoja 1: Pacientes, hoja 2: Bombas)
-        # Nota: Si tus hojas no están en ese orden, usaremos el nombre
-        url_pacientes = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Pacientes"
-        url_bombas = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Bombas"
-        
-        df_p = pd.read_csv(url_pacientes)
-        df_b = pd.read_csv(url_bombas)
+        # ttl="0m" asegura que siempre lea datos frescos de la nube
+        df_p = conn.read(worksheet="Pacientes", ttl="0m")
+        df_b = conn.read(worksheet="Bombas", ttl="0m")
         return df_p, df_b
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
-        return pd.DataFrame(columns=["cama", "peso"]), pd.DataFrame()
-
-# Reemplaza la llamada inicial:
-df_pacientes, df_bombas = cargar_datos()
+    except Exception:
+        # Si las hojas están vacías, devolvemos DataFrames con columnas correctas
+        return pd.DataFrame(columns=["cama", "peso"]), pd.DataFrame(columns=["cama", "droga", "mg", "vol", "modo", "ritmo", "dosis", "timestamp"])
 
 # 4. SEGURIDAD
 if "password_correct" not in st.session_state:
@@ -92,81 +80,95 @@ with st.sidebar:
 # 7. MONITOR PRINCIPAL
 st.title("Monitor de Infusiones - Red UCC I")
 
-if df_pacientes.empty:
-    st.info("No hay pacientes registrados en la red. Use el panel lateral.")
+if df_pacientes.empty or "cama" not in df_pacientes.columns:
+    st.info("No hay pacientes registrados en la red. Use el panel lateral para dar de alta una cama.")
 else:
-    # Ordenar camas numéricamente
-    camas_ids = sorted(df_pacientes["cama"].unique(), key=lambda x: int(x))
-    tabs = st.tabs([f"Unidad {c}" for c in camas_ids])
+    # Ordenar camas numéricamente para los Tabs
+    try:
+        camas_ids = sorted(df_pacientes["cama"].dropna().unique(), key=lambda x: int(x))
+    except Exception:
+        camas_ids = sorted(df_pacientes["cama"].dropna().unique())
 
-    for i, cama_id in enumerate(camas_ids):
-        with tabs[i]:
-            # Obtener peso del paciente
-            peso_p = df_pacientes[df_pacientes["cama"] == str(cama_id)]["peso"].values[0]
-            
-            col_h1, col_h2 = st.columns([4, 1])
-            col_h1.subheader(f"Unidad {cama_id} | {peso_p} kg")
-            
-            # --- BOTÓN AÑADIR BOMBA ---
-            if col_h2.button(f"➕ Añadir Infusión", key=f"btn_add_{cama_id}"):
-                nueva_b = pd.DataFrame([{
-                    "cama": str(cama_id), 
-                    "droga": "Noradrenalina", 
-                    "mg": 4.0, 
-                    "vol": 250, 
-                    "modo": "TITULAR", 
-                    "ritmo": 0.0, 
-                    "dosis": 0.0, 
-                    "timestamp": datetime.now().strftime("%H:%M:%S")
-                }])
-                df_bombas = pd.concat([df_bombas, nueva_b]).reset_index(drop=True)
-                conn.update(worksheet="Bombas", data=df_bombas)
-                st.rerun()
+    if not camas_ids:
+        st.warning("La lista de pacientes está vacía o mal formateada.")
+    else:
+        tabs = st.tabs([f"Unidad {c}" for c in camas_ids])
 
-            # --- LISTADO DE BOMBAS ---
-            bombas_actuales = df_bombas[df_bombas["cama"] == str(cama_id)]
-            
-            for idx, row in bombas_actuales.iterrows():
-                with st.container(border=True):
-                    c1, c2, c3, c4 = st.columns([1.5, 2.5, 1, 0.4])
+        for i, cama_id in enumerate(camas_ids):
+            with tabs[i]:
+                # --- PROTECCIÓN CONTRA INDEXERROR ---
+                datos_paciente = df_pacientes[df_pacientes["cama"] == str(cama_id)]
+                
+                if not datos_paciente.empty:
+                    peso_p = datos_paciente["peso"].values[0]
+                else:
+                    peso_p = 70.0  # Valor de rescate si hay error en la planilla
+                
+                col_h1, col_h2 = st.columns([4, 1])
+                col_h1.subheader(f"Unidad {cama_id} | {peso_p} kg")
+                
+                # --- BOTÓN AÑADIR BOMBA ---
+                if col_h2.button(f"➕ Añadir Infusión", key=f"btn_add_{cama_id}"):
+                    nueva_b = pd.DataFrame([{
+                        "cama": str(cama_id), 
+                        "droga": "Noradrenalina", 
+                        "mg": 4.0, 
+                        "vol": 250, 
+                        "modo": "TITULAR", 
+                        "ritmo": 0.0, 
+                        "dosis": 0.0, 
+                        "timestamp": datetime.now().strftime("%H:%M:%S")
+                    }])
+                    # Si df_bombas está vacío, inicializamos con el nuevo dato
+                    if df_bombas.empty:
+                        df_bombas = nueva_b
+                    else:
+                        df_bombas = pd.concat([df_bombas, nueva_b]).reset_index(drop=True)
                     
-                    with c1:
-                        # Droga y Dilución (Lectura de la nube)
-                        st.markdown(f"**{row['droga']}**")
-                        st.caption(f"{row['mg']} mg / {row['vol']} ml")
-                        
-                        # Si quieres editar mg/vol, deberías hacerlo en la Sheet o agregar inputs aquí que disparen un conn.update
-                        # Por ahora, mantenemos la visualización y cálculo rápido
+                    conn.update(worksheet="Bombas", data=df_bombas)
+                    st.rerun()
+
+                # --- LISTADO DE BOMBAS ---
+                if not df_bombas.empty and "cama" in df_bombas.columns:
+                    bombas_actuales = df_bombas[df_bombas["cama"] == str(cama_id)]
                     
-                    with c2:
-                        # Modo y Valor (Sincronizado)
-                        val_actual = st.number_input(f"Ritmo/Dosis ({idx})", value=float(row['ritmo']), key=f"inp_{idx}")
-                        
-                        if val_actual != row['ritmo']:
-                            df_bombas.at[idx, 'ritmo'] = val_actual
-                            conn.update(worksheet="Bombas", data=df_bombas)
-                            st.rerun()
+                    for idx, row in bombas_actuales.iterrows():
+                        with st.container(border=True):
+                            c1, c2, c3, c4 = st.columns([1.5, 2.5, 1, 0.4])
+                            
+                            with c1:
+                                st.markdown(f"**{row['droga']}**")
+                                st.caption(f"{row['mg']} mg / {row['vol']} ml")
+                            
+                            with c2:
+                                val_actual = st.number_input(f"Ritmo ({idx})", value=float(row['ritmo']), key=f"inp_{idx}")
+                                
+                                if val_actual != row['ritmo']:
+                                    df_bombas.at[idx, 'ritmo'] = val_actual
+                                    conn.update(worksheet="Bombas", data=df_bombas)
+                                    st.rerun()
 
-                        if row['modo'] == "TITULAR":
-                            # Cálculo de gammas
-                            res = (row['ritmo'] * row['mg'] * 1000) / (60 * peso_p * row['vol']) if row['vol'] > 0 else 0
-                            st.metric("DOSIS (gammas)", f"{res:.3f}")
-                        else:
-                            st.metric("RITMO (ml/h)", f"{row['ritmo']:.1f}")
+                                if row['modo'] == "TITULAR":
+                                    res = (row['ritmo'] * row['mg'] * 1000) / (60 * peso_p * row['vol']) if row['vol'] > 0 else 0
+                                    st.metric("DOSIS (gammas)", f"{res:.3f}")
+                                else:
+                                    st.metric("RITMO (ml/h)", f"{row['ritmo']:.1f}")
 
-                    with c3:
-                        conc = (row['mg'] * 1000 / row['vol']) if row['vol'] > 0 else 0
-                        st.write(f"Conc: {conc:.1f} µg/ml")
-                        st.caption(f"Act: {row['timestamp']}")
+                            with c3:
+                                conc = (row['mg'] * 1000 / row['vol']) if row['vol'] > 0 else 0
+                                st.write(f"Conc: {conc:.1f} µg/ml")
+                                st.caption(f"Act: {row['timestamp']}")
 
-                    with c4:
-                        st.write(" ")
-                        if st.button("🗑️", key=f"del_{idx}"):
-                            df_bombas = df_bombas.drop(idx)
-                            conn.update(worksheet="Bombas", data=df_bombas)
-                            st.rerun()
+                            with c4:
+                                st.write(" ")
+                                if st.button("🗑️", key=f"del_{idx}"):
+                                    df_bombas = df_bombas.drop(idx)
+                                    conn.update(worksheet="Bombas", data=df_bombas)
+                                    st.rerun()
+                else:
+                    st.caption("Sin infusiones activas.")
 
-# 8. PIE DE PÁGINA (MODIFICADO)
+# 8. PIE DE PÁGINA
 st.markdown("""
     <p style='text-align: center; color: #444; font-size: 0.7rem; margin-top: 50px;'>
     HOSPITAL ITALIANO DE CÓRDOBA | SERVICIO DE CARDIOLOGÍA
