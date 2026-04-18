@@ -27,11 +27,27 @@ st.markdown("""
 # 3. CONEXIÓN A BASE DE DATOS (GOOGLE SHEETS)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# --- NUEVA LÓGICA DE CARGA DIRECTA ---
 def cargar_datos():
-    # ttl="0m" asegura que siempre lea datos frescos de la nube
-    df_p = conn.read(worksheet="Pacientes", ttl="0m")
-    df_b = conn.read(worksheet="Bombas", ttl="0m")
-    return df_p, df_b
+    try:
+        # Extraemos el ID de la planilla de los secrets
+        raw_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        sheet_id = raw_url.split("/d/")[1].split("/")[0]
+        
+        # URL directa para CSV (hoja 1: Pacientes, hoja 2: Bombas)
+        # Nota: Si tus hojas no están en ese orden, usaremos el nombre
+        url_pacientes = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Pacientes"
+        url_bombas = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=Bombas"
+        
+        df_p = pd.read_csv(url_pacientes)
+        df_b = pd.read_csv(url_bombas)
+        return df_p, df_b
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return pd.DataFrame(columns=["cama", "peso"]), pd.DataFrame()
+
+# Reemplaza la llamada inicial:
+df_pacientes, df_bombas = cargar_datos()
 
 # 4. SEGURIDAD
 if "password_correct" not in st.session_state:
